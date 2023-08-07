@@ -1,0 +1,16 @@
+.dub
+docs.json
+__dummy.html
+docs/
+/kdl-d
+kdl-d.so
+kdl-d.dylib
+kdl-d.dll
+kdl-d.a
+kdl-d.lib
+kdl-d-test-*
+*.exe
+*.pdb
+*.o
+*.obj
+*.lst

@@ -1,0 +1,6 @@
+name "kdl-d"
+description "D library for the [KDL Document Language](kdl.dev)."
+authors "Justin Stephens"
+copyright "Copyright © 2023, Justin Stephens"
+license "MIT"
+sourcePaths "source" "kdl"

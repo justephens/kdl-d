@@ -1,0 +1,25 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "code-d",
+            "request": "launch",
+            "dubBuild": true,
+            "name": "DUB Build & Debug",
+            "cwd": "${command:dubWorkingDirectory}",
+            "program": "${command:dubTarget}"
+        },
+        {
+            "type": "code-d",
+            "request": "launch",
+            "dubBuild": true,
+            "name": "DUB Unittest Debug",
+            "cwd": "${command:dubWorkingDirectory}",
+            "program": "${command:dubTarget}",
+            "args": ["test"]
+        }
+    ]
+}
