@@ -13,13 +13,11 @@
             "program": "${command:dubTarget}"
         },
         {
-            "type": "code-d",
+            "type": "lldb",
             "request": "launch",
-            "dubBuild": true,
-            "name": "DUB Unittest Debug",
-            "cwd": "${command:dubWorkingDirectory}",
-            "program": "${command:dubTarget}",
-            "args": ["test"]
+            "name": "Debug Unittest",
+            "program": "kdl-d-test-library",
+            "cwd": "${workspaceFolder}"
         }
     ]
 }
