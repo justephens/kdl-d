@@ -3,4 +3,14 @@ description "D library for the [KDL Document Language](kdl.dev)."
 authors "Justin Stephens"
 copyright "Copyright © 2023, Justin Stephens"
 license "MIT"
-sourcePaths "examples" "kdl"
+
+configuration "library" {
+    sourcePaths "kdl"
+    importPaths "kdl"
+}
+configuration "example" {
+    targetName "kdl-d-example"
+    targetType "executable"
+    sourcePaths "example" "kdl"
+    importPaths "kdl"
+}

@@ -3,12 +3,14 @@ docs.json
 __dummy.html
 docs/
 /kdl-d
+libkdl-d.a
 kdl-d.so
 kdl-d.dylib
 kdl-d.dll
 kdl-d.a
 kdl-d.lib
 kdl-d-test-*
+kdl-d-example
 *.exe
 *.pdb
 *.o

@@ -7,10 +7,11 @@
         {
             "type": "code-d",
             "request": "launch",
-            "dubBuild": true,
-            "name": "DUB Build & Debug",
+            "dubBuild": false,
+            "name": "DUB Debug",
             "cwd": "${command:dubWorkingDirectory}",
-            "program": "${command:dubTarget}"
+            "program": "kdl-d-examples",
+            "args": ["examples/documents/website.kdl"]
         },
         {
             "type": "lldb",

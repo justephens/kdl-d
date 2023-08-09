@@ -1,23 +1,39 @@
 module kdl.dom;
 
 import std.stdio;
+import kdl.parse : VisitType, KdlParser;
 
 struct DomVisitor
 {
-    void visitIdentifier(T...)(T args)
+    void visit(VisitType type, T...)(T args)
     {
-        writeln("Identifier:");
+        writeln("Visit ", type, ":");
         foreach (a; args)
-        {
-            writeln(a);
-        }
+            writeln("  ", a);
     }
+}
 
-    auto opDispatch(string member, T...)(T args)
-    {
-        writeln("Call:");
-        writeln("  ", member);
-        foreach (a; args)
-            writeln("  - ", a);
+struct Value
+{
+    import std.typecons : Nullable;
+
+    union U {
+        string s;
+        ulong i;
+        real f;
+        bool b;
     }
+    private Nullable!U _inner;
+
+    string typeHint;
+}
+
+struct Node
+{
+    string typeHint;
+    string name;
+    Value[string] properties;
+    Value[] values;
+
+    Node[] children;
 }
