@@ -10,17 +10,26 @@ it's time to bring it to D.
 ## Example
 
 ```D
+import kdl;
+
 import std.file : readText;
 import std.stdio : writeln;
-import std.uni : byCodePoint;
 
-// Read file into memory, create a range to lazily decode into unicode code points
-auto inputFile = readText("myFile.kdl");
-auto inputStream = inputFile.byCodePoint();
+void main(string[] args)
+{
+    // Read file into memory, create a range to lazily decode the UTF-8 into codepoints
+    auto input = readText(args[1]);
 
-// Parse into a DOM
-DomVisitor vis;
-KdlParser!vis.parseNodes(inputStream);
+    // Parse into DOM
+    DomVisitor vis;
+    KdlParser!vis.parse(input);
+
+    // vis.root is the document root
+
+    // Print DOM
+    writeln(vis.root);
+}
+
 ```
 
 ## Features
@@ -28,6 +37,7 @@ KdlParser!vis.parseNodes(inputStream);
 - Range-based parser will parse any [Forward Range](https://dlang.org/phobos/std_range_primitives.html#isForwardRange) of `dchar`.
 - Visitor pattern means parser backend can by easily customized.
   - See [doc/VisitorInterface.md] for more information.
+- Parse documents into a DOM tree
 
 ### Planned features
 

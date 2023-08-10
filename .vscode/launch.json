@@ -10,8 +10,8 @@
             "dubBuild": false,
             "name": "DUB Debug",
             "cwd": "${command:dubWorkingDirectory}",
-            "program": "kdl-d-examples",
-            "args": ["examples/documents/website.kdl"]
+            "program": "kdl-d-example",
+            "args": ["example/documents/website.kdl"]
         },
         {
             "type": "lldb",

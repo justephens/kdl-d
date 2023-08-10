@@ -11,6 +11,7 @@ import std.conv;
 import std.range;
 import std.range.primitives;
 import std.traits;
+import std.typecons;
 import std.utf;
 import std.uni;
 
@@ -20,16 +21,46 @@ enum SlashDash : string
     No = ""
 }
 
-enum VisitType
+enum VisitType : uint
 {
     DocumentBegin,
     DocumentEnd,
     Node,
     NodeEnd,
     Property,
-    Value,
+    ValueString,
+    ValueNumber,
+    ValueKeyword,
     ChildrenBegin,
     ChildrenEnd,
+}
+
+enum Keyword
+{
+    None,
+    Null,
+    True,
+    False,
+}
+
+enum Radix
+{
+    Unknown,
+    Decimal,
+    Hex,
+    Octal,
+    Binary,
+}
+
+struct Number
+{
+    bool sign;
+    Radix radix;
+    ulong integral;
+    ulong fractional;
+    ubyte fractionalDigits;
+    bool exponentSign;
+    ulong exponent;
 }
 
 bool isKdlVisitor(T)()
@@ -142,26 +173,47 @@ private auto chooseFirstNonEmptyParse(R, S...)(R input, lazy S parse)
  +/
 private bool tryConsume(R, U)(ref R input, U content) if (isInputRange!R)
 {
-    if (input.empty() == false && input.startsWith(content))
+    if (input.empty() == false)
     {
         static if (isArray!U)
         {
-            for (auto i = 0; i < content.length; i++)
-                input.popFront();
+            auto s = input.save;
+            if (input.startsWith(content))
+            {
+                input.popFrontN(content.length);
+                return true;
+            }
+            else
+            {
+                input = s;
+                return false;
+            }
         }
         else static if (isForwardRange!U)
         {
-            for (auto i = 0; i < walkLength(content); i++)
-                input.popFront();
+            auto s = input.save;
+            if (input.startsWith(content))
+            {
+                for (auto i = 0; i < walkLength(content); i++)
+                    input.popFront();
+                return true;
+            }
+            else
+            {
+                input = s;
+                return false;
+            }
         }
         else static if (isScalarType!U)
         {
-            input.popFront();
+            if (input.front() == content)
+            {
+                input.popFront();
+                return true;
+            }
         }
-        return true;
     }
-    else
-        return false;
+    return false;
 }
 
 /++
@@ -172,13 +224,76 @@ private bool tryConsume(R, U)(ref R input, U content) if (isInputRange!R)
  +/
 template KdlParser(alias visitor)
 {
-    void parse(R)(ref R input) if (isForwardRange!R && is(ElementType!R == dchar))
+    void parse(R)(ref R input) if (isForwardRange!R && isSomeChar!(ElementType!R))
     {
+        static if (is(ElementType!R == dchar) == false)
+            alias inp = input.byCodePoint();
+        else
+            alias inp = input;
+
         visitor.visit!(VisitType.DocumentBegin)();
 
-        parseNodes(input);
+        parseNodes(inp);
 
         visitor.visit!(VisitType.DocumentEnd)();
+    }
+
+    /++ 
+     + Wraps a range by reference and provides an interface for rolling back to a earlier point or
+     + extracting the difference.
+     +/
+    struct RollbackRange(R) if (isForwardRange!R)
+    {
+        RefRange!R source;
+        R sourceSave;
+        size_t n;
+
+        this(ref R input)
+        {
+            source = refRange(&input);
+            sourceSave = input.save();
+            n = 0;
+        }
+
+        auto front()
+        {
+            return source.front();
+        }
+
+        auto popFront()
+        {
+            n++;
+            return source.popFront();
+        }
+
+        auto save()
+        {
+            auto dup = this;
+            dup.sourceSave = (*source.ptr()).save();
+            return dup;
+        }
+
+        auto empty()
+        {
+            return source.empty();
+        }
+
+        auto getMatch()
+        {
+            return sourceSave.take(n);
+        }
+
+        void revert()
+        {
+            *(source.ptr()) = sourceSave;
+        }
+
+        auto opAssign(RollbackRange!R r)
+        {
+            (*source.ptr()) = r.sourceSave;
+            n = r.n;
+            return this;
+        }
     }
 
     void parseNodes(R)(ref R input)
@@ -267,23 +382,43 @@ template KdlParser(alias visitor)
 
         auto typeHint = readTypeHint(input);
 
-        auto value = input.chooseFirstNonEmptyParse(
-            readRawString(input),
-            readEscapedString(input),
-            readNumber(input),
-            readKeyword(input)
-        );
+        {
+            auto str = readRawString(input);
+            if (str.empty() == false)
+            {
+                visitor.visit!(VisitType.ValueString)(slashdash, typeHint, str);
+                return true;
+            }
+        }
+        {
+            auto str = readEscapedString(input);
+            if (str.empty() == false)
+            {
+                visitor.visit!(VisitType.ValueString)(slashdash, typeHint, str);
+                return true;
+            }
+        }
+        {
+            auto tup = readNumber(input);
+            auto num = tup[0];
+            auto range = tup[1];
+            if (num.radix != Radix.Unknown)
+            {
+                visitor.visit!(VisitType.ValueNumber)(slashdash, typeHint, num, range);
+                return true;
+            }
+        }
+        {
+            auto keyword = readKeyword(input);
+            if (keyword != Keyword.None)
+            {
+                visitor.visit!(VisitType.ValueKeyword)(slashdash, typeHint, keyword);
+                return true;
+            }
+        }
 
-        if (value.empty)
-        {
-            input = start;
-            return false;
-        }
-        else
-        {
-            visitor.visit!(VisitType.Value)(slashdash, typeHint, value);
-            return true;
-        }
+        input = start;
+        return false;
     }
 
     /++ 
@@ -730,150 +865,131 @@ template KdlParser(alias visitor)
     auto readNumber(R)(ref R input)
             if (isForwardRange!R && is(ElementType!R == dchar))
     {
-        bool sign_pos = true;
+        auto match = RollbackRange!R(input);
 
-        if (input.front() == '-')
+        Number num;
+
+        if (match.tryConsume('-'))
+            num.sign = false;
+        else if (match.tryConsume('+'))
+            num.sign = true;
+
+        if (match.tryConsume("0b"))
         {
-            sign_pos = false;
-            input.popFront();
-        }
-        else if (input.front() == '+')
-            input.popFront();
-
-        auto prefix = input.take(2);
-        if (prefix.equal("0b"))
-        {
-            input.popFront();
-            input.popFront();
-
-            ulong bin = 0;
+            num.radix = Radix.Binary;
             while (true)
             {
-                if (input.front() == '0')
+                if (match.front() == '0')
                 {
-                    bin <<= 1;
+                    num.integral <<= 1;
+                    match.popFront();
                 }
-                else if (input.front() == '1')
+                else if (match.front() == '1')
                 {
-                    bin <<= 1;
-                    bin |= 1;
+                    num.integral <<= 1;
+                    num.integral |= 1;
+                    match.popFront();
                 }
-                else if (input.front() == '_')
-                    continue;
+                else if (match.front() == '_')
+                    match.popFront();
                 else
                     break;
             }
-
-            import std.stdio;
-
-            writeln("Binary literal: ", bin);
         }
-        else if (prefix.equal("0o"))
+        else if (match.tryConsume("0o"))
         {
-            input.popFront();
-            input.popFront();
-
-            ulong oct = 0;
+            num.radix = Radix.Octal;
 
             while (true)
             {
-                if (input.front().isOctal())
+                if (match.front().isOctal())
                 {
-                    oct <<= 3;
-                    oct |= hexLookup(input.front());
+                    num.integral <<= 3;
+                    num.integral |= hexLookup(match.front());
+                    match.popFront();
                 }
-                else if (input.front() == '_')
-                    continue;
+                else if (match.front() == '_')
+                    match.popFront();
                 else
                     break;
             }
-
-            import std.stdio;
-
-            writeln("Octal literal: ", oct);
         }
-        else if (prefix.equal("0x"))
+        else if (match.tryConsume("0x"))
         {
-            input.popFront();
-            input.popFront();
-            ulong hex = 0;
+            num.radix = Radix.Hex;
+
             while (true)
             {
-                if (input.front().isHex())
+                if (match.front().isHex())
                 {
-                    hex <<= 3;
-                    hex |= hexLookup(input.front());
+                    num.integral <<= 4;
+                    num.integral |= hexLookup(match.front());
+                    match.popFront();
                 }
-                else if (input.front() == '_')
-                    continue;
+                else if (match.front() == '_')
+                    match.popFront();
                 else
                     break;
             }
-
-            import std.stdio;
-
-            writeln("Hex literal: ", hex);
         }
         else
         {
-            ulong integral = 0;
-            ulong fractional = 0;
-            ulong exponent = 0;
+            if (match.front().isDigit())
+                num.radix = Radix.Decimal;
 
-            while (input.front().isDigit())
+            while (match.front().isDigit())
             {
-                integral *= 10;
-                integral += hexLookup(input.front());
-                input.popFront();
+                num.integral *= 10;
+                num.integral += hexLookup(match.front());
+                match.popFront();
             }
 
-            if (input.front() == '.')
+            if (match.front() == '.')
             {
-                input.popFront();
-                while (input.front().isDigit())
+                match.popFront();
+                while (match.front().isDigit())
                 {
-                    fractional *= 10;
-                    fractional += hexLookup(input.front());
-                    input.popFront();
+                    num.fractional *= 10;
+                    num.fractional += hexLookup(match.front());
+                    num.fractionalDigits++;
+                    match.popFront();
                 }
             }
 
-            if (input.front().toUpper() == 'E')
+            if (match.front().toUpper() == 'E')
             {
-                bool exponent_pos = true;
-                if (input.front() == '+')
-                    input.popFront();
-                else if (input.front() == '-')
+                match.popFront();
+                num.exponentSign = true;
+                if (match.front() == '+')
+                    match.popFront();
+                else if (match.front() == '-')
                 {
-                    exponent_pos = false;
-                    input.popFront();
+                    num.exponentSign = false;
+                    match.popFront();
                 }
 
-                while (input.front().isDigit())
+                while (match.front().isDigit())
                 {
-                    exponent += hexLookup(input.front());
-                    input.popFront();
+                    num.exponent *= 10;
+                    num.exponent += hexLookup(match.front());
+                    match.popFront();
                 }
-
-                if (exponent_pos == false)
-                    exponent = -exponent;
             }
         }
 
-        return "";
+        return tuple(num, match.getMatch());
     }
 
-    auto readKeyword(R)(ref R input)
+    Keyword readKeyword(R)(ref R input)
     {
-        auto start = input.save;
         if (input.tryConsume("true"))
-            return start.take(4);
+            return Keyword.True;
         else if (input.tryConsume("false"))
-            return start.take(5);
+            return Keyword.False;
         else if (input.tryConsume("null"))
-            return start.take(4);
+            return Keyword.Null;
         else
-            return start.take(0);
+            return Keyword.None;
     }
 
     unittest

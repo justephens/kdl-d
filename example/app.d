@@ -3,7 +3,6 @@ import kdl.parse;
 
 import std.file : readText;
 import std.stdio : writeln;
-import std.uni : byCodePoint;
 
 void main(string[] args)
 {
@@ -12,13 +11,13 @@ void main(string[] args)
         return;
     }
 
-    // Read file into memory, create a range to lazily decode the UTF-8 into codepoints
-    auto inputFile = readText(args[1]);
-    auto inputStream = inputFile.byCodePoint();
+    // Read file into memory
+    auto input = readText(args[1]);
 
     // Parse
-    writeln(inputStream);
+    writeln(input);
     writeln("========");
     DomVisitor vis;
-    KdlParser!vis.parse(inputStream);
+    KdlParser!vis.parse(input);
+    writeln(vis.root);
 }
