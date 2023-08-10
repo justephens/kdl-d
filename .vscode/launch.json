@@ -14,6 +14,15 @@
             "args": ["example/documents/website.kdl"]
         },
         {
+            "type": "code-d",
+            "request": "launch",
+            "dubBuild": false,
+            "name": "Debug Test Cases",
+            "cwd": "${command:dubWorkingDirectory}",
+            "program": "kdl-d-test-cases",
+            "args": []
+        },
+        {
             "type": "lldb",
             "request": "launch",
             "name": "Debug Unittest",

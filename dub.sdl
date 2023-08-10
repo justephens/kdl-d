@@ -14,3 +14,9 @@ configuration "example" {
     sourcePaths "example" "kdl"
     importPaths "kdl"
 }
+configuration "test_cases" {
+    targetName "kdl-d-test-cases"
+    targetType "executable"
+    sourcePaths "kdl" "test"
+    importPaths "kdl"
+}
