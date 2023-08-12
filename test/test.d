@@ -4,9 +4,15 @@ import kdl;
 import std.file;
 import std.stdio;
 import std.path;
+import std.getopt;
+
+bool verbose = false;
 
 void main(string[] args)
 {
+    getopt(args,
+        "verbose", &verbose);
+
     // Make sure the KDL test cases are here
     auto testInputDir = buildNormalizedPath(getcwd(), "test/kdl/tests/test_cases/input");
     auto testExpectedDir = buildNormalizedPath(getcwd(), "test/kdl/tests/test_cases/expected_kdl");
@@ -22,17 +28,15 @@ void main(string[] args)
         auto outFile = buildNormalizedPath(testExpectedDir, baseName(inFile));
 
         bool expectParseFailure = false;
-        if (isFile(outFile) == false)
+        if (exists(outFile) == false || isFile(outFile) == false)
         {
             expectParseFailure = true;
         }
 
-        writeln("Test ", baseName(inFile));
+        write("Test ", baseName(inFile), " ... ");
         if (expectParseFailure)
-            writeln("    Expect parse failure");
-        else
-            writeln("    Expect match with ", baseName(outFile));
-        
+            write("(expect parse failure) ");
+
         // Parse input file
         auto input = readText(inFile);
         DomVisitor vis;
@@ -44,21 +48,32 @@ void main(string[] args)
         {
             if (expectParseFailure)
             {
-                writeln("  PASS");
+                writeln("PASS");
                 continue;
             }
             else
                 throw e;
         }
 
-        // Check that output matches input
-        auto expected = readText(outFile);
+        // Read in expected results
+        string expected;
+        if (expectParseFailure)
+            expected = "";
+        else
+            expected = readText(outFile);
+
+        // Output what we parsed
         auto output = vis.root.toString();
 
+        // Check that output matches expected results
         if (output != expected)
+            writeln("FAIL");
+        else
+            writeln("PASS");
+
+        if (output != expected || verbose)
         {
-            writeln("  FAIL\n");
-            writeln("More information:");
+            writeln("\nMore information:");
             writeln(inFile, " (source):");
             writeln("----------------");
             writeln(readText(inFile));
@@ -71,10 +86,6 @@ void main(string[] args)
             writeln("----------------");
             writeln(output);
             writeln("\n\n");
-        }
-        else
-        {
-            writeln("  PASS");
         }
     }
 }

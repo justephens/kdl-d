@@ -1,7 +1,16 @@
 module kdl.dom;
 
+/++
+ + kdl.dom
+ + 
+ + Authors: Justin Stephens
+ + Copyright: 2023 Justin Stephens
+ + License: MIT
+ +/
+
 import std.array : appender, Appender;
-import kdl.parse : VisitType, KdlParser, Number, Keyword;
+import kdl.parse;
+import kdl.util;
 
 struct Value
 {
@@ -9,8 +18,8 @@ struct Value
     union InnerUnion
     {
         string s;
-        ulong ul;
-        real re;
+        BasedNumber bn;
+        DecimalNumber dn;
         bool b;
     }
 
@@ -18,8 +27,8 @@ struct Value
     {
         Null = "",
         String = "s",
-        Ulong = "ul",
-        Real = "re",
+        BasedNumber = "bn",
+        DecimalNumber = "dn",
         Bool = "b"
     }
 
@@ -47,10 +56,16 @@ struct Value
         }
     }
 
-    this(Number num)
+    this(BasedNumber num)
     {
-        inner.ul = num.integral;
-        type = Type.Ulong;
+        inner.bn = num;
+        type = Type.BasedNumber;
+    }
+
+    this(DecimalNumber num)
+    {
+        inner.dn = num;
+        type = Type.DecimalNumber;
     }
 
     this(string str)
@@ -72,14 +87,55 @@ struct Value
         import std.string : format;
         import std.uni : byCodePoint, CodepointSet;
 
+        if (typeHint.length > 0)
+        {
+            str.put("(");
+            auto t = classifyIdentifier(typeHint);
+            if (t == IdentifierType.Bare)
+                str.put(typeHint);
+            else if (t == IdentifierType.String)
+            {
+                str.put('"');
+                str.writeEscaped(typeHint);
+                str.put('"');
+            }
+            str.put(")");
+        }
+
         if (type == Type.Null)
         {
             str.put("null");
             return;
         }
-        if (type == Type.Ulong)
+        if (type == Type.BasedNumber)
         {
-            str.put(to!string(inner.ul));
+            str.put(to!string(inner.bn.value));
+            return;
+        }
+        if (type == Type.DecimalNumber)
+        {
+            import std.math : ceil;
+            import std.math.exponential : log10;
+            import std.range : repeat;
+
+            str.put(to!string(inner.dn.integral));
+
+            if (inner.dn.fractionalDigits > 0)
+            {
+                auto fracDigits = 0;
+                for (ulong i = inner.dn.fractional; i > 0; i /= 10)
+                    fracDigits++;
+                str.put(repeat(' ', inner.dn.fractionalDigits - fracDigits));
+            }
+
+            if (inner.dn.exponent > 0)
+            {
+                str.put("e");
+                if (inner.dn.exponentSign == false)
+                    str.put("-");
+                str.put(to!string(inner.dn.exponent));
+            }
+
             return;
         }
         // todo: the below causes linker errors?
@@ -96,39 +152,7 @@ struct Value
         if (type == Type.String)
         {
             str.put('"');
-            foreach (dchar c; inner.s.byCodePoint())
-            {
-                switch (c)
-                {
-                case '\u000A':
-                    str.put(`\n`);
-                    break;
-                case '\u000D':
-                    str.put(`\r`);
-                    break;
-                case '\u0009':
-                    str.put(`\t`);
-                    break;
-                case '\u005C':
-                    str.put(`\\`);
-                    break;
-                // case '\u002F':
-                //     str.put(`\/`);
-                //     break;
-                case '\u0022':
-                    str.put(`\"`);
-                    break;
-                case '\u0008':
-                    str.put(`\b`);
-                    break;
-                case '\u000C':
-                    str.put(`\f`);
-                    break;
-                default:
-                    str.put(c);
-                    break;
-                }
-            }
+            str.writeEscaped(inner.s);
             str.put('"');
         }
     }
@@ -136,13 +160,12 @@ struct Value
 
 struct Node
 {
+    Node* parent;
     string typeHint;
     string name;
     Value[string] properties;
     Value[] values;
-
     Node*[] children;
-    Node* parent;
 
     this(string name)
     {
@@ -160,40 +183,47 @@ struct Node
     string toString() const pure
     {
         auto a = appender!string;
-        this.buildString(a, 0);
+        this.buildString(a);
         return a[];
     }
 
-    void buildString(ref Appender!string str, size_t ind = 0) const pure
+    void buildString(ref Appender!string str, int ind = -1) const pure
     {
         import std.range : chain;
 
-        void indent(size_t x = ind)
+        void indent(int x = ind)
         {
             for (auto i = x; i > 0; i--)
                 str.put("    ");
         }
 
-        indent(ind);
-        if (typeHint.length > 0)
-            str.put(chain("(", typeHint, ")"));
-        str.put(name);
+        if (ind >= 0)
+        {
+            indent(ind);
+            if (typeHint.length > 0)
+                str.put(chain("(", typeHint, ")"));
+            str.put(name);
 
-        foreach (val; values)
-            str.put(chain(" ", val.toString()));
+            foreach (val; values)
+                str.put(chain(" ", val.toString()));
 
-        foreach (key, val; properties)
-            str.put(chain(" ", key, "=", val.toString()));
+            foreach (key, val; properties)
+                str.put(chain(" ", key, "=", val.toString()));
+        }
 
         if (children.length > 0)
         {
-            str.put(" {\n");
+            if (ind >= 0)
+                str.put(" {\n");
             foreach (c; children)
                 c.buildString(str, ind + 1);
-            indent();
-            str.put("}\n");
+            if (ind >= 0)
+            {
+                indent();
+                str.put("}\n");
+            }
         }
-        else
+        else if (ind >= 0)
             str.put("\n");
     }
 }
@@ -203,81 +233,141 @@ struct DomVisitor
     Node root = Node("document");
     Node* head;
 
-    bool pendingProp = false;
-    string propName;
+    // State from prior tokens
+    private bool slashdash = false;
+    private string typeHint = null;
+    private string propName = null;
 
-    import std.conv : to;
-    import std.stdio : writeln;
+    // Tracks depth of tree relative relative to the oldest ancestor which was commented out via a
+    // slashdash. When either is > 0, current processing is commented out.
+    private int node_sds = 0;
+    private int child_sds = 0;
 
-    void visit(VisitType type, T...)(T args) if (type == VisitType.DocumentBegin)
+    void visit(Token type, T...)(T args)
     {
-    }
+        import std.conv : to;
 
-    void visit(VisitType type, T...)(T args) if (type == VisitType.DocumentEnd)
-    {
-    }
-
-    void visit(VisitType type, T...)(T args) if (type == VisitType.ChildrenBegin)
-    {
-    }
-
-    void visit(VisitType type, T...)(T args) if (type == VisitType.ChildrenEnd)
-    {
-    }
-
-    void visit(VisitType type, T...)(T args) if (type == VisitType.Node)
-    {
-        if (head == null)
-            head = &root;
-
-        if (args[0] != "/-")
+        void ProcessValue()(Value val)
         {
+            if (slashdash || node_sds > 0 || child_sds > 0)
+            {
+                slashdash = false;
+                return;
+            }
+
+            if (typeHint != null)
+            {
+                val.typeHint = typeHint;
+                typeHint = null;
+            }
+
+            if (propName != null)
+            {
+                head.properties[propName] = val;
+                propName = null;
+            }
+            else
+            {
+                head.values ~= val;
+            }
+        }
+
+        import std.stdio : writeln;
+
+        // writeln("Token: ", type);
+        // foreach (a; args)
+        // {
+        //     writeln("  ", a);
+        // }
+
+        static if (type == Token.DocumentBegin)
+        {
+            slashdash = false;
+            typeHint = null;
+            propName = null;
+            node_sds = 0;
+            child_sds = 0;
+        }
+        else static if (type == Token.DocumentEnd)
+        {
+        }
+        else static if (type == Token.SlashDash)
+        {
+            slashdash = true;
+        }
+        else static if (type == Token.TypeHint)
+        {
+            typeHint = to!string(args[0]);
+        }
+        else static if (type == Token.ChildrenBegin)
+        {
+            if (slashdash || child_sds > 0)
+            {
+                slashdash = false;
+                child_sds++;
+            }
+        }
+        else static if (type == Token.ChildrenEnd)
+        {
+            if (child_sds > 0)
+                child_sds--;
+        }
+        else static if (type == Token.Node)
+        {
+            if (head == null)
+                head = &root;
+
+            if (slashdash || node_sds > 0 || child_sds > 0)
+            {
+                slashdash = false;
+                node_sds++;
+                return;
+            }
+
             head = head.addChild();
-            head.typeHint = to!string(args[1]);
-            head.name = to!string(args[2]);
+            head.name = to!string(args[0]);
+            if (typeHint != null)
+            {
+                head.typeHint = typeHint;
+                typeHint = null;
+            }
         }
-    }
-
-    void visit(VisitType type, T...)(T args) if (type == VisitType.Property)
-    {
-        if (args[0] != "/-")
+        else static if (type == Token.NodeEnd)
         {
-            propName = to!string(args[1]);
-            pendingProp = true;
+            head = head.parent;
+            if (node_sds > 0)
+                node_sds--;
         }
-    }
-
-    void visit(VisitType type, T...)(T args)
-            if (type == VisitType.ValueString || type == VisitType.ValueNumber
-            || type == VisitType.ValueKeyword)
-    {
-        if (args[0] == "/-")
-            return;
-
-        static if (type == VisitType.ValueString)
+        else static if (type == Token.Property)
         {
-            auto val = Value(to!string(args[2]));
-        }
-        else
-        {
-            auto val = Value(args[2]);
-        }
-        val.typeHint = to!string(args[1]);
+            // If a slashdash precedes this property, do nothing. Leave the slashdash flag high so that
+            // the next Value we visit gets omitted as well
+            //      or
+            // If the node or child list is slashdashed out, do nothing
+            if (slashdash || node_sds > 0 || child_sds > 0)
+            {
+                return;
+            }
 
-        // We just saw a property event
-        if (pendingProp)
-        {
-            pendingProp = false;
-            head.properties[propName] = val;
+            // Set the property pending flag. The the next Value visited will be entered into the
+            // property dictionary instead of the value array.
+            propName = to!string(args[0]);
         }
-        else
+        else static if (type == Token.EscapedString || type == Token.RawString)
         {
-            head.values ~= val;
+            ProcessValue(Value(to!string(args[0])));
         }
-    }
-
-    void visit(VisitType type)() if (type == VisitType.NodeEnd)
-    {
-        head = head.parent;
+        else static if (type == Token.Keyword)
+        {
+            ProcessValue(Value(args[0]));
+        }
+        else static if (type == Token.BasedNumber)
+        {
+            ProcessValue(Value(args[0]));
+        }
+        else static if (type == Token.DecimalNumber)
+        {
+            ProcessValue(Value(args[0]));
+        }
     }
 }

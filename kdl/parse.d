@@ -2,9 +2,15 @@ module kdl.parse;
 
 /++
  + kdl.parse
+ + 
+ + Authors: Justin Stephens
+ + Copyright: 2023 Justin Stephens
+ + License: MIT
  +
  + See_Also: The [KDL Specification](https://github.com/kdl-org/kdl/blob/main/SPEC.md)
  +/
+
+import kdl.util;
 
 import std.algorithm;
 import std.conv;
@@ -12,27 +18,26 @@ import std.range;
 import std.range.primitives;
 import std.traits;
 import std.typecons;
+import std.meta;
 import std.utf;
 import std.uni;
 
-enum SlashDash : string
-{
-    Yes = "/-",
-    No = ""
-}
-
-enum VisitType : uint
+enum Token : uint
 {
     DocumentBegin,
     DocumentEnd,
+    SlashDash,
+    TypeHint,
     Node,
     NodeEnd,
-    Property,
-    ValueString,
-    ValueNumber,
-    ValueKeyword,
     ChildrenBegin,
     ChildrenEnd,
+    Property,
+    RawString,
+    EscapedString,
+    BasedNumber,
+    DecimalNumber,
+    Keyword,
 }
 
 enum Keyword
@@ -52,10 +57,42 @@ enum Radix
     Binary,
 }
 
-struct Number
+struct BasedNumber
+{
+    Radix radix;
+    ulong value;
+
+    string toString() const @safe pure
+    {
+        enum bases = AliasSeq!(
+                tuple(Radix.Binary, 1, "0b"),
+                tuple(Radix.Octal, 3, "0o"),
+                tuple(Radix.Hex, 4, "0x")
+            );
+        auto str = appender!(char[])();
+
+        static foreach (t; bases)
+        {
+            if (radix == t[0])
+            {
+                ulong v = value;
+                while (v > 0)
+                {
+                    str.put(hexEncode(v & 0b1));
+                    v >>= t[1];
+                }
+
+                str.put(t[2].retro());
+            }
+        }
+
+        return str[].reverse;
+    }
+}
+
+struct DecimalNumber
 {
     bool sign;
-    Radix radix;
     ulong integral;
     ulong fractional;
     ubyte fractionalDigits;
@@ -63,158 +100,7 @@ struct Number
     ulong exponent;
 }
 
-bool isKdlVisitor(T)()
-{
-    return hasMember!(T, "visitIdentifier");
-}
-
-byte hexLookup(T)(T c)
-{
-    switch (c.toUpper)
-    {
-    case '0':
-        return 0;
-    case '1':
-        return 1;
-    case '2':
-        return 2;
-    case '3':
-        return 3;
-    case '4':
-        return 4;
-    case '5':
-        return 5;
-    case '6':
-        return 6;
-    case '7':
-        return 7;
-    case '8':
-        return 8;
-    case '9':
-        return 9;
-    case 'A':
-        return 10;
-    case 'B':
-        return 11;
-    case 'C':
-        return 12;
-    case 'D':
-        return 13;
-    case 'E':
-        return 14;
-    case 'F':
-        return 15;
-    default:
-        assert(0);
-    }
-}
-
-auto addChar(T)(CodepointSet set, T b)
-{
-    return set.add(b, cast(uint)(b + 1));
-}
-
-enum whiteSpaceSet = CodepointSet()
-        .addChar('\u0009').addChar('\u0020').addChar('\u00A0')
-        .addChar('\u1680').addChar('\u2000').addChar('\u2001')
-        .addChar('\u2002').addChar('\u2003').addChar('\u2004')
-        .addChar('\u2005').addChar('\u2006').addChar('\u2007')
-        .addChar('\u2008').addChar('\u2009').addChar('\u200A')
-        .addChar('\u202F').addChar('\u205F').addChar('\u3000');
-enum newlineSet = CodepointSet()
-        .addChar('\u000D').addChar('\u000A').addChar('\u0085')
-        .addChar('\u000C').addChar('\u2028').addChar('\u2029');
-enum nonIdentifierSet = CodepointSet(0x20, 0x10FFFF).inverted()
-        .addChar('\\').addChar('/').addChar('(').addChar(')').addChar('{')
-        .addChar('}').addChar('<').addChar('>').addChar(';').addChar('[')
-        .addChar(']').addChar('=').addChar(',').addChar('"')
-        .add(whiteSpaceSet).add(newlineSet);
-enum octalSet = CodepointSet('0', '7' + 1);
-enum digitSet = CodepointSet('0', '9' + 1);
-enum hexSet = CodepointSet(digitSet).add('a', 'f' + 1).add('A', 'F' + 1);
-enum nonInitialSet = nonIdentifierSet.add(digitSet);
-
-// Generate functions to test for character types
-mixin(whiteSpaceSet.toSourceCode("isWhitespace"));
-mixin(newlineSet.toSourceCode("isNewline"));
-mixin(nonIdentifierSet.toSourceCode("isNonIdentifier"));
-mixin(octalSet.toSourceCode("isOctal"));
-mixin(digitSet.toSourceCode("isDigit"));
-mixin(hexSet.toSourceCode("isHex"));
-mixin(nonInitialSet.toSourceCode("isNonInitial"));
-
-/++ 
- + Run a sequences of parsers until a non-empty result is returned
- + Params:
- +   parse = Variadic sequence of lazy parsing expressions. These will be evaluated in order, and
- +           the first to return a valid match returned.
- +/
-private auto chooseFirstNonEmptyParse(R, S...)(R input, lazy S parse)
-{
-    static if (parse.length > 1)
-    {
-        auto res = parse[0]();
-        return choose(res.empty() == false, res, chooseFirstNonEmptyParse(input, parse[1 .. $]));
-    }
-    else
-    {
-        auto res = parse[0]();
-        return choose(res.empty() == false, res, input.take(0));
-    }
-}
-
-/++ 
- + Tries to consume the `content` string from the front of the `input` range.
- + Params:
- +   input = Input range to try and consume from
- +   content = The string to consume
- + Returns:
- +   true if `content` was matched and consumed from `input`
- +/
-private bool tryConsume(R, U)(ref R input, U content) if (isInputRange!R)
-{
-    if (input.empty() == false)
-    {
-        static if (isArray!U)
-        {
-            auto s = input.save;
-            if (input.startsWith(content))
-            {
-                input.popFrontN(content.length);
-                return true;
-            }
-            else
-            {
-                input = s;
-                return false;
-            }
-        }
-        else static if (isForwardRange!U)
-        {
-            auto s = input.save;
-            if (input.startsWith(content))
-            {
-                for (auto i = 0; i < walkLength(content); i++)
-                    input.popFront();
-                return true;
-            }
-            else
-            {
-                input = s;
-                return false;
-            }
-        }
-        else static if (isScalarType!U)
-        {
-            if (input.front() == content)
-            {
-                input.popFront();
-                return true;
-            }
-        }
-    }
-    return false;
-}
+alias EmitFlag = Flag!"emit";
 
 /++
  + KDL parsing utilities are templated at the top level to allow control over parser behavior.
@@ -224,76 +110,16 @@ private bool tryConsume(R, U)(ref R input, U content) if (isInputRange!R)
  +/
 template KdlParser(alias visitor)
 {
-    void parse(R)(ref R input) if (isForwardRange!R && isSomeChar!(ElementType!R))
+    void parse(R)(ref R input) if (isForwardRange!R && !is(ElementType!R == dchar))
     {
-        static if (is(ElementType!R == dchar) == false)
-            alias inp = input.byCodePoint();
-        else
-            alias inp = input;
-
-        visitor.visit!(VisitType.DocumentBegin)();
-
-        parseNodes(inp);
-
-        visitor.visit!(VisitType.DocumentEnd)();
+        parse(input.byCodePoint());
     }
 
-    /++ 
-     + Wraps a range by reference and provides an interface for rolling back to a earlier point or
-     + extracting the difference.
-     +/
-    struct RollbackRange(R) if (isForwardRange!R)
+    void parse(R)(ref R input) if (isForwardRange!R && is(ElementType!R == dchar))
     {
-        RefRange!R source;
-        R sourceSave;
-        size_t n;
-
-        this(ref R input)
-        {
-            source = refRange(&input);
-            sourceSave = input.save();
-            n = 0;
-        }
-
-        auto front()
-        {
-            return source.front();
-        }
-
-        auto popFront()
-        {
-            n++;
-            return source.popFront();
-        }
-
-        auto save()
-        {
-            auto dup = this;
-            dup.sourceSave = (*source.ptr()).save();
-            return dup;
-        }
-
-        auto empty()
-        {
-            return source.empty();
-        }
-
-        auto getMatch()
-        {
-            return sourceSave.take(n);
-        }
-
-        void revert()
-        {
-            *(source.ptr()) = sourceSave;
-        }
-
-        auto opAssign(RollbackRange!R r)
-        {
-            (*source.ptr()) = r.sourceSave;
-            n = r.n;
-            return this;
-        }
+        visitor.visit!(Token.DocumentBegin)();
+        parseNodes(input);
+        visitor.visit!(Token.DocumentEnd)();
     }
 
     void parseNodes(R)(ref R input)
@@ -312,24 +138,57 @@ template KdlParser(alias visitor)
         readLineSpacing(input);
     }
 
+    bool parseSlashDash(R)(ref R input)
+    {
+        if (input.tryConsume("/-"))
+        {
+            visitor.visit!(Token.SlashDash)();
+            readNodeSpacing(input);
+            return true;
+        }
+        else
+            return false;
+    }
+
+    bool parseTypeHint(R)(ref R input)
+    {
+        auto start = input.save();
+        if (input.tryConsume('(') == false)
+            return false;
+
+        auto hint = readIdentifier(input);
+        if (hint.empty())
+            return false;
+
+        if (input.tryConsume(')') == false)
+        {
+            throw new Exception(
+                "Type hint closing parenthesis missing or not adjacent to type identifier");
+        }
+
+        visitor.visit!(Token.TypeHint)(hint);
+        return true;
+    }
+
     bool parseNode(R)(ref R input)
     {
-        SlashDash slashdash = SlashDash.No;
-        if (input.tryConsume("/-"))
-            slashdash = SlashDash.Yes;
-
-        auto typeHint = readTypeHint(input);
+        parseSlashDash(input);
+        parseTypeHint(input);
 
         auto identifier = readIdentifier(input);
 
         if (identifier.empty())
             return false;
+        if (readNodeSpacing(input) == false && input.empty() == false)
+            return false;
 
-        visitor.visit!(VisitType.Node)(slashdash, typeHint, identifier);
+        visitor.visit!(Token.Node)(identifier);
 
         // Read properties and values as long as possible
         while (true)
         {
+            parseSlashDash(input);
+
             readNodeSpacing(input);
 
             if (parseProperty(input))
@@ -341,25 +200,20 @@ template KdlParser(alias visitor)
 
         // Check for children
         readNodeSpacing(input);
-        SlashDash children_slashdash = SlashDash.No;
-        if (input.tryConsume("/-"))
-        {
-            children_slashdash = SlashDash.Yes;
-            readNodeSpacing(input);
-        }
+        parseSlashDash(input);
         if (input.tryConsume("{"))
         {
-            visitor.visit!(VisitType.ChildrenBegin)(children_slashdash);
+            visitor.visit!(Token.ChildrenBegin)();
 
             parseNodes(input);
 
             if (input.tryConsume("}") == false)
-                throw new Exception("Expected closing } after node children");
+                return false;
 
-            visitor.visit!(VisitType.ChildrenEnd)();
+            visitor.visit!(Token.ChildrenEnd)();
         }
 
-        visitor.visit!(VisitType.NodeEnd)();
+        visitor.visit!(Token.NodeEnd)();
 
         return true;
     }
@@ -376,46 +230,20 @@ template KdlParser(alias visitor)
     {
         auto start = input.save;
 
-        SlashDash slashdash = SlashDash.No;
-        if (input.tryConsume("/-"))
-            slashdash = SlashDash.Yes;
+        // Parse optional prefixes
+        parseTypeHint(input);
 
-        auto typeHint = readTypeHint(input);
-
-        {
-            auto str = readRawString(input);
-            if (str.empty() == false)
-            {
-                visitor.visit!(VisitType.ValueString)(slashdash, typeHint, str);
-                return true;
-            }
-        }
-        {
-            auto str = readEscapedString(input);
-            if (str.empty() == false)
-            {
-                visitor.visit!(VisitType.ValueString)(slashdash, typeHint, str);
-                return true;
-            }
-        }
-        {
-            auto tup = readNumber(input);
-            auto num = tup[0];
-            auto range = tup[1];
-            if (num.radix != Radix.Unknown)
-            {
-                visitor.visit!(VisitType.ValueNumber)(slashdash, typeHint, num, range);
-                return true;
-            }
-        }
-        {
-            auto keyword = readKeyword(input);
-            if (keyword != Keyword.None)
-            {
-                visitor.visit!(VisitType.ValueKeyword)(slashdash, typeHint, keyword);
-                return true;
-            }
-        }
+        // Try to parse each of the value-literal options
+        if (parseRawString(input))
+            return true;
+        if (parseEscapedString(input))
+            return true;
+        if (parseBasedLiteral(input))
+            return true;
+        if (parseDecimalNumber(input))
+            return true;
+        if (parseKeyword(input))
+            return true;
 
         input = start;
         return false;
@@ -433,10 +261,6 @@ template KdlParser(alias visitor)
     {
         auto start = input.save;
 
-        SlashDash slashdash = SlashDash.No;
-        if (input.tryConsume("/-"))
-            slashdash = SlashDash.Yes;
-
         auto ident = readIdentifier(input);
         if (ident.empty())
         {
@@ -450,12 +274,385 @@ template KdlParser(alias visitor)
             return false;
         }
 
-        visitor.visit!(VisitType.Property)(slashdash, ident);
+        visitor.visit!(Token.Property)(ident);
 
         if (parseValue(input) == false)
-            throw new Exception("Property assignment has invalid or missing value");
+            return false;
 
         return true;
+    }
+
+    /++ 
+     + Reads an "Escaped String", i.e. a string literal between two double quotes.
+     + Params:
+     +   input = Forward Range of current parse location in the KDL document
+     + Returns:
+     +   Decoded string literal, omitting the enclosing quotes; Empty range if there is not a valid
+     +   string literal on input.
+     +/
+    auto parseEscapedString(EmitFlag emit = Yes.emit, R)(ref R input)
+            if (isForwardRange!R && is(ElementType!R == dchar))
+    {
+        auto es = StringEscapeReader!R(input);
+        if (input.empty() || es.front() != '"')
+        {
+            static if (emit)
+                return false;
+            else
+                return es.take(0);
+        }
+        else
+            es.popFront();
+
+        size_t n = 0;
+        auto start = es.save();
+
+        while (es.empty() == false)
+        {
+            es.popFront();
+            n++;
+        }
+
+        input = es.src;
+
+        static if (emit)
+        {
+            visitor.visit!(Token.EscapedString)(start.take(n));
+            return true;
+        }
+        else
+            return start.take(n);
+    }
+
+    unittest
+    {
+        string str1 = `"Just a string."`;
+        assert(parseEscapedString(str1).equal(`Just a string.`));
+
+        string str2 = `"A string with \"several\" \u{005C}escape codes. \u{00B5}"`;
+        assert(parseEscapedString(str2)
+                .equal(`A string with "several" \escape codes. µ`));
+    }
+
+    /++ 
+     + Params:
+     +   input = Forward Range of current parse location in the KDL document
+     + Returns:
+     +   Raw contents between opening and closing tags; Empty range if there was no valid raw string
+     +   literal on input.
+     +/
+
+    /++ 
+     + 
+     + Params:
+     +      input = Forward Range of the KDL document
+     + Returns:
+     +      If `emit`, returns a boolean status flag
+     +      If not `emit`, returns a range over the contents of the string; range is empty to
+     +      indicate failure.
+     +/
+    auto parseRawString(EmitFlag emit = Yes.emit, R)(ref R input)
+            if (isForwardRange!R && is(ElementType!R == dchar))
+    {
+        auto start = input.save;
+
+        if (input.tryConsume('r') == false)
+        {
+            input = start;
+            static if (emit)
+                return false;
+            else
+                return input.take(0);
+        }
+
+        // Parse the hash-plus-quote tag used to open the raw string, then reverse it to make the
+        // closing pattern
+        size_t delimiter_len = 0;
+        while (input.tryConsume('#'))
+            delimiter_len++;
+        if (input.tryConsume('"') == false)
+        {
+            input = start;
+            static if (emit)
+                return false;
+            else
+                return input.take(0);
+        }
+        auto closeTag = to!(dchar[])(chain("\"", '#'.repeat(delimiter_len)));
+
+        auto contents = input.save();
+        size_t n = 0;
+
+        // Read until the closing tag is seen.
+        // todo: std.algorithm.searching.boyerMooreFinder requires a random-access haystack, so it
+        //       cannot be used out of the box here. A custom implementation of the algorithm should
+        //       be implemented to operate on ForwardRange haystacks in chunks.
+        while (input.empty() == false && input.startsWith(closeTag) == false)
+        {
+            input.popFront();
+            n++;
+        }
+
+        if (input.empty())
+            throw new Exception("Unterminated raw string literal");
+        else
+            for (auto i = 0; i < closeTag.length; i++)
+                input.popFront();
+
+        // Return the unprocessed contents between the opening and closing tags
+        static if (emit)
+        {
+            visitor.visit!(Token.RawString)(contents.take(n));
+            return true;
+        }
+        else
+        {
+            return contents.take(n);
+        }
+    }
+
+    unittest
+    {
+        string str = `r#"Just a "raw" string \with\no\escapes"# and more values`;
+        assert(parseRawString(str).equal(`Just a "raw" string \with\no\escapes`));
+    }
+
+    /++ 
+     + Reads a based literal (0b, 0o, or 0x prefix).
+     + Params:
+     +   input = Forward Range of the current parse location in the KDL document
+     + Returns:
+     +   Tuple (BasedNumber, Range) where element 0 is the extracted and decoded literal, and
+     +   element 1 is the input the literal was extracted from.
+     +/
+    bool parseBasedLiteral(R)(ref R input)
+    {
+        import std.meta : AliasSeq, Alias;
+        import std.typecons : tuple;
+
+        auto start = input.save;
+        BasedNumber num;
+        ulong n = 0;
+
+        enum bases = AliasSeq!(
+                tuple(Radix.Binary, 1, "0b", (dchar a) => a == '0' || a == '1'),
+                tuple(Radix.Octal, 3, "0o", (dchar a) => a.isOctal()),
+                tuple(Radix.Hex, 4, "0x", (dchar a) => a.isHex())
+            );
+        static foreach (t; bases)
+        {
+            {
+                alias rad = Alias!(t[0]);
+                alias pwr2 = Alias!(t[1]);
+                alias prefix = Alias!(t[2]);
+                alias isBaseChar = Alias!(t[3]);
+
+                if (input.tryConsume(prefix))
+                {
+                    n += prefix.length;
+                    num.value = 0;
+
+                    if (input.empty() == false && isBaseChar(input.front()))
+                    {
+                        while (input.empty() == false)
+                        {
+                            if (isBaseChar(input.front()))
+                            {
+                                num.value <<= pwr2;
+                                num.value |= hexLookup(input.front());
+                                input.popFront();
+                                n++;
+                            }
+                            else if (input.front() == '_')
+                            {
+                                input.popFront();
+                                n++;
+                            }
+                            else
+                                break;
+                        }
+                    }
+                    else
+                        throw new Exception("Based Literal prefix followed by invalid character");
+
+                    num.radix = rad;
+
+                    visitor.visit!(Token.BasedNumber)(num, start.take(n));
+                    return true;
+                }
+            }
+        }
+
+        input = start;
+        return false;
+    }
+
+    /++ 
+     + 
+     + Params:
+     +   input = Forward Range of the current parse location in the KDL document
+     +/
+    bool parseDecimalNumber(R)(ref R input)
+            if (isForwardRange!R && is(ElementType!R == dchar))
+    {
+        auto start = input;
+        DecimalNumber num;
+        ulong n = 0;
+
+        if (input.tryConsume('-'))
+        {
+            num.sign = false;
+            n++;
+        }
+        else if (input.tryConsume('+'))
+        {
+            num.sign = true;
+            n++;
+        }
+
+        // Parse integer component
+        if (input.empty() == false && input.front().isDigit())
+        {
+            while (input.empty() == false)
+            {
+                if (input.front().isDigit())
+                {
+                    num.integral *= 10;
+                    num.integral += hexLookup(input.front());
+                    n++;
+                    input.popFront();
+                }
+                else if (input.front() == '_')
+                {
+                    n++;
+                    input.popFront();
+                }
+                else
+                    break;
+            }
+        }
+        else
+        {
+            input = start;
+            return false;
+        }
+
+        // Check if a fractional component is present, parse if it is
+        if (input.empty() == false && input.front() == '.')
+        {
+            input.popFront();
+            n++;
+
+            if (input.empty() == false && input.front().isDigit())
+            {
+                while (input.empty() == false)
+                {
+                    if (input.front().isDigit())
+                    {
+                        num.fractional *= 10;
+                        num.fractional += hexLookup(input.front());
+                        num.fractionalDigits++;
+                        n++;
+                        input.popFront();
+                    }
+                    else if (input.front() == '_')
+                    {
+                        n++;
+                        input.popFront();
+                    }
+                    else
+                        break;
+                }
+            }
+            else
+                throw new Exception("Ill-formed decimal numeric");
+        }
+
+        // Check if an exponent component is present, parse if it is
+        if (input.empty() == false && input.front().toUpper() == 'E')
+        {
+            input.popFront();
+            n++;
+
+            num.exponentSign = true;
+            if (input.front() == '+')
+            {
+                n++;
+                input.popFront();
+            }
+            else if (input.front() == '-')
+            {
+                num.exponentSign = false;
+                n++;
+                input.popFront();
+            }
+
+            if (input.empty() == false && input.front().isDigit())
+            {
+                while (input.empty() == false)
+                {
+                    if (input.front().isDigit())
+                    {
+                        num.exponent *= 10;
+                        num.exponent += hexLookup(input.front());
+                        n++;
+                        input.popFront();
+                    }
+                    else if (input.front() == '_')
+                    {
+                        n++;
+                        input.popFront();
+                    }
+                    else
+                        break;
+                }
+            }
+            else
+                throw new Exception("Ill-formed exponent");
+        }
+
+        // Return struct
+        visitor.visit!(Token.DecimalNumber)(num, input.take(n));
+        return true;
+    }
+
+    /++ 
+     + Parse out a keyword ("null", "false", or "true") from the input.
+     + Params:
+     +   input = Forward Range of the KDL document to read from
+     + Returns:
+     +      If emit == Yes, returns a boolean status flag (true: matched & emitted, false: no match)
+     +      If emit == No, returns a Keyword enum of the keyword match (Keyword.None if no match)
+     +/
+    auto parseKeyword(EmitFlag emit = Yes.emit, R)(ref R input)
+    {
+        static if (emit)
+        {
+            if (input.tryConsume("true"))
+                visitor.visit!(Token.Keyword)(Keyword.True);
+            else if (input.tryConsume("false"))
+                visitor.visit!(Token.Keyword)(Keyword.False);
+            else if (input.tryConsume("null"))
+                visitor.visit!(Token.Keyword)(Keyword.Null);
+            else
+                return false;
+            return true;
+        }
+        else
+        {
+            if (input.tryConsume("true"))
+                return Keyword.True;
+            else if (input.tryConsume("false"))
+                return Keyword.False;
+            else if (input.tryConsume("null"))
+                return Keyword.Null;
+            else
+                return Keyword.None;
+        }
+    }
+
+    unittest
+    {
     }
 
     bool readNewLine(R)(ref R input)
@@ -489,7 +686,7 @@ template KdlParser(alias visitor)
         bool pass = false;
         pass |= readWhiteSpaces(input);
 
-        if (input.front() == '\\')
+        if (input.empty() == false && input.front() == '\\')
         {
             input.popFront();
             readWhiteSpaces(input);
@@ -527,7 +724,7 @@ template KdlParser(alias visitor)
     {
         if (input.tryConsume("//"))
         {
-            while (true)
+            while (input.empty() == false)
             {
                 if (input.tryConsume("\r\n"))
                     break;
@@ -564,9 +761,9 @@ template KdlParser(alias visitor)
 
     auto readIdentifier(R)(ref R input)
     {
-        return input.chooseFirstNonEmptyParse(
-            readRawString(input),
-            readEscapedString(input),
+        return chooseFirstNonEmpty(
+            parseRawString!(No.emit)(input),
+            parseEscapedString!(No.emit)(input),
             readBareIdentifier(input)
         );
     }
@@ -608,6 +805,14 @@ template KdlParser(alias visitor)
             n++;
         }
 
+        // If the matched identifier is a reserved keyword, the parsing rule should fail
+        if (start.take(n).equal("null") || start.take(n).equal("true")
+            || start.take(n).equal("false"))
+        {
+            input = start;
+            return start.take(0);
+        }
+
         return start.take(n);
     }
 
@@ -621,379 +826,6 @@ template KdlParser(alias visitor)
         assert(readBareIdentifier(nodeNames).equal("+myNode"));
         nodeNames.skipOver(" ");
         assert(readBareIdentifier(nodeNames).equal(""));
-    }
-
-    /++ 
-     + Reads a type hint e.g. "(i32)" or "(timestamp)"
-     + Params:
-     +   input = Forward Range of the current parse location in the KDL document
-     + Returns:
-     +   Contents between the parentheses, or empty range if no type hint present.
-     +/
-    auto readTypeHint(R)(ref R input)
-    {
-        auto start = input.save();
-        if (input.tryConsume('(') == false)
-            return start.take(0);
-
-        auto hint = readIdentifier(input);
-        if (hint.empty())
-            return start.take(0);
-
-        if (input.tryConsume(')') == false)
-        {
-            throw new Exception(
-                "Type hint closing parenthesis missing or not adjacent to type identifier");
-        }
-
-        // todo: how to return `hint` directly without messing up return type inference
-        return start.drop(1).take(walkLength(hint));
-    }
-
-    /++ 
-     + Reads an "Escaped String", i.e. a string literal between two double quotes.
-     + Params:
-     +   input = Forward Range of current parse location in the KDL document
-     + Returns:
-     +   Decoded string literal, omitting the enclosing quotes; Empty range if there is not a valid
-     +   string literal on input.
-     +/
-    auto readEscapedString(R)(ref R input)
-            if (isForwardRange!R && is(ElementType!R == dchar))
-    {
-        /// A ForwardRange wrapper which processes escape codes on-the-fly. The range will appear empty
-        /// once the string literal has been terminated by an unescaped double quote.
-        struct StringEscapeRange
-        {
-            R src;
-            bool escaped = false;
-            dchar escaped_char = 0;
-
-            this(R src, bool esc = false, dchar c = 0)
-            {
-                this.src = src;
-                this.escaped = esc;
-                this.escaped_char = c;
-            }
-
-            dchar front()
-            {
-                if (escaped)
-                {
-                    return escaped_char;
-                }
-                else if (src.front() == '\\')
-                {
-                    escaped = true;
-                    src.popFront();
-                    switch (src.front())
-                    {
-                    case 'n':
-                        src.popFront();
-                        escaped_char = '\u000A';
-                        break;
-                    case 'r':
-                        src.popFront();
-                        escaped_char = '\u000D';
-                        break;
-                    case 't':
-                        src.popFront();
-                        escaped_char = '\u0009';
-                        break;
-                    case '\\':
-                        src.popFront();
-                        escaped_char = '\u005C';
-                        break;
-                    case '/':
-                        src.popFront();
-                        escaped_char = '\u002F';
-                        break;
-                    case '"':
-                        src.popFront();
-                        escaped_char = '\u0022';
-                        break;
-                    case 'b':
-                        src.popFront();
-                        escaped_char = '\u0008';
-                        break;
-                    case 'f':
-                        src.popFront();
-                        escaped_char = '\u000C';
-                        break;
-                    case 'u':
-                        // pop 'u' and '{'
-                        src.popFront();
-                        src.popFront();
-
-                        // decode the hex code between the brackets into a dchar
-                        escaped_char = 0;
-                        while (src.front() != '}')
-                        {
-                            if (src.front().isHex() == false)
-                                throw new Exception("Invalid unicode escape sequence");
-                            escaped_char <<= 4;
-                            escaped_char |= hexLookup(src.front());
-                            src.popFront();
-                        }
-                        src.popFront();
-                        break;
-                    default:
-                        throw new Exception("Invalid escape sequence");
-                    }
-                    return escaped_char;
-                }
-                else
-                {
-                    return src.front();
-                }
-            }
-
-            void popFront()
-            {
-                if (escaped)
-                    escaped = false;
-                else
-                    src.popFront();
-            }
-
-            bool empty()
-            {
-                if (src.empty())
-                    return true;
-                if (front() == '"' && escaped == false)
-                {
-                    popFront();
-                    escaped_char = '"';
-                    return true;
-                }
-                if (escaped_char == '"' && escaped == false)
-                    return true;
-                return false;
-            }
-
-            auto save()
-            {
-                return StringEscapeRange(this.src.save(), escaped, escaped_char);
-            }
-        }
-
-        auto es = StringEscapeRange(input);
-        if (input.empty() || es.front() != '"')
-            return es.take(0);
-        else
-            es.popFront();
-
-        size_t n = 0;
-        auto start = es.save();
-
-        while (es.empty() == false)
-        {
-            es.popFront();
-            n++;
-        }
-
-        input = es.src;
-        return start.take(n);
-    }
-
-    unittest
-    {
-        string str1 = `"Just a string."`;
-        assert(readEscapedString(str1).equal(`Just a string.`));
-
-        string str2 = `"A string with \"several\" \u{005C}escape codes. \u{00B5}"`;
-        assert(readEscapedString(str2)
-                .equal(`A string with "several" \escape codes. µ`));
-    }
-
-    /++ 
-     + Params:
-     +   input = Forward Range of current parse location in the KDL document
-     + Returns:
-     +   Raw contents between opening and closing tags; Empty range if there was no valid raw string
-     +   literal on input.
-     +/
-    auto readRawString(R)(ref R input)
-            if (isForwardRange!R && is(ElementType!R == dchar))
-    {
-        if (input.tryConsume('r') == false)
-            return input.take(0);
-
-        // Parse the hash-plus-quote tag used to open the raw string, then reverse it to make the
-        // closing pattern
-        size_t delimiter_len = 0;
-        while (input.tryConsume('#'))
-            delimiter_len++;
-        if (input.tryConsume('"') == false)
-            return input.take(0);
-        auto closeTag = to!(dchar[])(chain("\"", '#'.repeat(delimiter_len)));
-
-        auto start = input.save();
-        size_t n = 0;
-
-        // Read until the closing tag is seen.
-        // todo: std.algorithm.searching.boyerMooreFinder requires a random-access haystack, so it
-        //       cannot be used out of the box here. A custom implementation of the algorithm should
-        //       be implemented to operate on ForwardRange haystacks in chunks.
-        while (input.empty() == false && input.startsWith(closeTag) == false)
-        {
-            input.popFront();
-            n++;
-        }
-
-        if (input.empty())
-            throw new Exception("Unterminated raw string literal");
-        else
-            for (auto i = 0; i < closeTag.length; i++)
-                input.popFront();
-
-        // Return the unprocessed contents between the opening and closing tags
-        return start.take(n);
-    }
-
-    unittest
-    {
-        string str = `r#"Just a "raw" string \with\no\escapes"# and more values`;
-        assert(readRawString(str).equal(`Just a "raw" string \with\no\escapes`));
-    }
-
-    /++ 
-     + 
-     + Params:
-     +   input = Forward Range of the current parse location in the KDL document
-     +/
-    auto readNumber(R)(ref R input)
-            if (isForwardRange!R && is(ElementType!R == dchar))
-    {
-        auto match = RollbackRange!R(input);
-
-        Number num;
-
-        if (match.tryConsume('-'))
-            num.sign = false;
-        else if (match.tryConsume('+'))
-            num.sign = true;
-
-        if (match.tryConsume("0b"))
-        {
-            num.radix = Radix.Binary;
-            while (true)
-            {
-                if (match.front() == '0')
-                {
-                    num.integral <<= 1;
-                    match.popFront();
-                }
-                else if (match.front() == '1')
-                {
-                    num.integral <<= 1;
-                    num.integral |= 1;
-                    match.popFront();
-                }
-                else if (match.front() == '_')
-                    match.popFront();
-                else
-                    break;
-            }
-        }
-        else if (match.tryConsume("0o"))
-        {
-            num.radix = Radix.Octal;
-
-            while (true)
-            {
-                if (match.front().isOctal())
-                {
-                    num.integral <<= 3;
-                    num.integral |= hexLookup(match.front());
-                    match.popFront();
-                }
-                else if (match.front() == '_')
-                    match.popFront();
-                else
-                    break;
-            }
-        }
-        else if (match.tryConsume("0x"))
-        {
-            num.radix = Radix.Hex;
-
-            while (true)
-            {
-                if (match.front().isHex())
-                {
-                    num.integral <<= 4;
-                    num.integral |= hexLookup(match.front());
-                    match.popFront();
-                }
-                else if (match.front() == '_')
-                    match.popFront();
-                else
-                    break;
-            }
-        }
-        else
-        {
-            if (match.front().isDigit())
-                num.radix = Radix.Decimal;
-
-            while (match.front().isDigit())
-            {
-                num.integral *= 10;
-                num.integral += hexLookup(match.front());
-                match.popFront();
-            }
-
-            if (match.front() == '.')
-            {
-                match.popFront();
-                while (match.front().isDigit())
-                {
-                    num.fractional *= 10;
-                    num.fractional += hexLookup(match.front());
-                    num.fractionalDigits++;
-                    match.popFront();
-                }
-            }
-
-            if (match.front().toUpper() == 'E')
-            {
-                match.popFront();
-                num.exponentSign = true;
-                if (match.front() == '+')
-                    match.popFront();
-                else if (match.front() == '-')
-                {
-                    num.exponentSign = false;
-                    match.popFront();
-                }
-
-                while (match.front().isDigit())
-                {
-                    num.exponent *= 10;
-                    num.exponent += hexLookup(match.front());
-                    match.popFront();
-                }
-            }
-        }
-
-        return tuple(num, match.getMatch());
-    }
-
-    Keyword readKeyword(R)(ref R input)
-    {
-        if (input.tryConsume("true"))
-            return Keyword.True;
-        else if (input.tryConsume("false"))
-            return Keyword.False;
-        else if (input.tryConsume("null"))
-            return Keyword.Null;
-        else
-            return Keyword.None;
-    }
-
-    unittest
-    {
     }
 }
 
